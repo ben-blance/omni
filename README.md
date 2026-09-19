@@ -90,8 +90,8 @@ The SATISH *format* is public and documented on purpose (see
 isn't: a `.satish_*` file's header should always be inspectable, independent
 of whether you have the model or algorithm that produced it.
 
-**License:** not yet decided. Don't treat anything in this repo as
-licensed for reuse until a LICENSE file with real terms replaces the
-placeholder — see [LICENSE](LICENSE). Whatever's chosen for this repo (the
-CLI/format shell) needs to not accidentally extend to the private engine or
-model weights, which are meant to stay proprietary.
+**License:** MIT — see [LICENSE](LICENSE). This covers the CLI and SATISH
+format shell in this repo only; it does not extend to the private
+compression engine or trained model weights, which are distributed
+separately (see "Public vs. private" above) and are not covered by this
+license.

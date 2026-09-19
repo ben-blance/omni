@@ -1,18 +1,28 @@
-LICENSE — NOT YET DECIDED
+MIT License
 
-No license terms have been chosen for this repository yet. Until this file
-is replaced with real license text, nothing here is licensed for reuse,
-modification, or redistribution by anyone other than the copyright holder.
+Copyright (c) 2026 ben-blance
 
-Before the first public push, decide:
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-  - What license (if any) covers this repo — the CLI, the SATISH format
-    code/spec, docs, and examples. MIT/Apache-2.0 are common choices for a
-    CLI/format shell like this one.
-  - That the chosen license's grant is scoped to what's actually in this
-    repo, and does not inadvertently extend to the private compression
-    engine, trained model weights, or any other proprietary component that
-    lives outside it.
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
-This is a legal/business decision, not a technical one — pick it
-deliberately rather than defaulting to a template.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+This license covers this repository only: the OMNI CLI, the SATISH container
+format, install scripts, docs, and examples. It does not cover the private
+compression engine, trained model weights, or any other component
+distributed separately from this repository.

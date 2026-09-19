@@ -8,9 +8,17 @@ version = "0.1.0"
 description = "OMNI — install-and-go neural compression for source code"
 readme = "README.md"
 requires-python = ">=3.10"
-# License: TBD before first public release — see README's "Public vs
-# private" section. Don't publish this package with a license declared
-# until that decision is made.
+license = "MIT"
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Archiving :: Compression",
+]
+
+[project.urls]
+Homepage = "https://github.com/ben-blance/omni"
+Repository = "https://github.com/ben-blance/omni"
 
 [project.scripts]
 omni = "omni.cli:main"
