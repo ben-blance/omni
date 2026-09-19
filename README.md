@@ -36,13 +36,20 @@ omni models                                             # installed model genera
 omni version
 ```
 
-Model management (no public registry endpoint exists yet — see below):
+Model management — `omni model update` fetches the latest generation
+directly from this repo's [GitHub Releases](https://github.com/ben-blance/omni/releases)
+(tagged `<generation>-<year>`, e.g. `andromeda-2026`), no separate registry
+server required:
 
 ```
+omni model update                                       # install/refresh the latest generation
+omni model update --force                                # re-download even if already installed
 omni model register <name> <year> <model.pt> --so <arithmetic_coder.so> [--default]
 omni model default <name>
-omni model update                                       # stub until a registry exists
 ```
+
+`omni model update` checks `ben-blance/omni` by default — override with the
+`OMNI_MODEL_REPO` env var (`owner/repo`) to point at a fork.
 
 `omni compress` always uses the latest installed generation unless you pass
 `--model`. `omni decompress` always uses whatever generation the archive's

@@ -16,11 +16,10 @@ docstrings for why.
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
-from . import __version__, engine, registry, satish
+from . import __version__, engine, registry, remote, satish
 
 _IGNORE_DIRS = {".git", "__pycache__", "venv", ".venv", "node_modules",
                  ".mypy_cache", ".pytest_cache", "build", "dist", ".tox"}
@@ -190,14 +189,14 @@ def cmd_model_default(args: argparse.Namespace) -> None:
     print(f"[omni] default model set to '{args.name}'")
 
 
-def cmd_model_update(_args: argparse.Namespace) -> None:
-    url = os.environ.get("OMNI_MODEL_REGISTRY_URL")
-    if not url:
-        print("[omni] no model registry endpoint configured yet.\n"
-              "       Set OMNI_MODEL_REGISTRY_URL once one exists, or "
-              "register a model locally with `omni model register`.")
-        return
-    print(f"[omni] would check {url} for new generations — not implemented yet.")
+def cmd_model_update(args: argparse.Namespace) -> None:
+    print(f"[omni] checking {remote._repo()} for the latest generation …")
+    try:
+        entry = remote.update(force=args.force)
+    except remote.UpdateError as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(1)
+    print(f"[omni] '{entry.name}' ({entry.year}) is installed and set as default")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -242,6 +241,7 @@ def build_parser() -> argparse.ArgumentParser:
     md.set_defaults(func=cmd_model_default)
 
     mu = msub.add_parser("update", help="Fetch the latest model generation")
+    mu.add_argument("--force", action="store_true", help="Re-download even if already installed")
     mu.set_defaults(func=cmd_model_update)
 
     return p
