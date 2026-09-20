@@ -17,12 +17,43 @@ from __future__ import annotations
 
 import argparse
 import sys
+import threading
+import time
 from pathlib import Path
 
 from . import __version__, engine, registry, remote, satish
 
 _IGNORE_DIRS = {".git", "__pycache__", "venv", ".venv", "node_modules",
                  ".mypy_cache", ".pytest_cache", "build", "dist", ".tox"}
+
+
+def _with_progress(label: str, fn, *args, **kwargs):
+    """Runs a slow, non-interruptible engine call with a live elapsed-time
+    indicator. The engine (compress_files_lz_cost / decompress_files_lz)
+    has no internal progress callback — it's one blocking call — so this
+    can't show real percentage, only that it's still working, which is
+    enough to stop it looking stuck on anything beyond a handful of files."""
+    done = threading.Event()
+    start = time.time()
+
+    def spin():
+        frames = "|/-\\"
+        i = 0
+        while not done.wait(0.5):
+            elapsed = time.time() - start
+            sys.stdout.write(f"\r[omni] {label}… {elapsed:.0f}s {frames[i % 4]}")
+            sys.stdout.flush()
+            i += 1
+
+    t = threading.Thread(target=spin, daemon=True)
+    t.start()
+    try:
+        return fn(*args, **kwargs)
+    finally:
+        done.set()
+        t.join()
+        sys.stdout.write("\r" + " " * 40 + "\r")
+        sys.stdout.flush()
 
 
 def _collect_py_files(root: Path) -> list[Path]:
@@ -73,8 +104,10 @@ def cmd_compress(args: argparse.Namespace) -> None:
           f"'{entry.name}' ({entry.year}) …")
 
     model = engine.load_model(entry.model_path)
-    blob, stats = engine.compress_sources(sources, model, entry.so_path,
-                                           min_match=args.min_match)
+    blob, stats = _with_progress(
+        "compressing", engine.compress_sources, sources, model,
+        entry.so_path, min_match=args.min_match,
+    )
 
     out_path = (Path(args.out) if args.out
                 else Path(f"{root_name}{satish.extension_for(entry.name)}"))
@@ -115,7 +148,9 @@ def cmd_decompress(args: argparse.Namespace) -> None:
 
     print(f"[omni] decompressing with model '{entry.name}' ({entry.year}) …")
     model = engine.load_model(entry.model_path)
-    sources = engine.decompress_sources(parsed.payload, model, entry.so_path)
+    sources = _with_progress(
+        "decompressing", engine.decompress_sources, parsed.payload, model, entry.so_path,
+    )
 
     single_flat_file = len(parsed.files) == 1 and "/" not in parsed.files[0]
     if single_flat_file:
