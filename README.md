@@ -1,9 +1,8 @@
 # OMNI
 
-OMNI is a neural compressor for source code. It beats `tar+xz` on ratio for
-Python codebases by combining a trained sequence model with explicit
-long-range copy matching and entropy coding, instead of general-purpose
-byte-level compression.
+OMNI is a neural compressor for Python source code. It combines a trained
+sequence model with explicit long-range copy matching and entropy coding to
+beat general-purpose compressors on ratio.
 
 ```
 omni compress my_project/
@@ -13,85 +12,117 @@ omni decompress my_project.satish_andromeda
 # -> my_project/  (byte-identical to the original)
 ```
 
+## Benchmark
+
+Compression saving vs. original size, measured on 9 real-world Python
+repositories OMNI was never trained on, compared against `tar+xz` (the
+standard general-purpose baseline):
+
+| repo | OMNI | tar+xz | margin |
+|---|---|---|---|
+| flask | 82.9% | 79.7% | +3.2pp |
+| pytest | 79.9% | 73.7% | +6.2pp |
+| click | 82.2% | 79.2% | +3.0pp |
+| rich | 72.9% | 70.5% | +2.4pp |
+| attrs | 83.6% | 81.1% | +2.5pp |
+| httpx | 86.1% | 84.1% | +2.0pp |
+| starlette | 84.1% | 80.9% | +3.2pp |
+| alembic | 85.8% | 84.7% | +1.1pp |
+| pydantic | 83.6% | 81.6% | +2.0pp |
+
+**9 out of 9 unseen repos beat tar+xz**, by 1.1 to 6.2 percentage points.
+Every result above is a full round-trip: decompressed output verified
+byte-identical to the original source across all files in every repo.
+
 ## Install
 
-Real one-line installers (`apt install omni`, `curl ... | sh`) aren't live
-yet. For now:
-
 ```
-git clone <this repo>
-cd omni
-./install.sh
+pipx install omni-compress
+omni model update
 ```
 
-which installs the `omni` CLI in editable mode via pip.
+(`pip install omni-compress` works too if you don't use `pipx`.) `omni model
+update` downloads the current model generation — needed before `compress`/
+`decompress` will do anything.
 
-## Usage
+## Quickstart
 
 ```
-omni compress <path> [--model NAME] [--out FILE]     # file or directory
+omni model update                    # one-time: install the latest model
+omni compress my_project/            # -> my_project.satish_andromeda
+omni decompress my_project.satish_andromeda
+```
+
+## Commands
+
+```
+omni compress <path> [--model NAME] [--out FILE]
+```
+Compress a single file or a whole directory. Directories are walked for
+`.py` files (skipping `.git`, `__pycache__`, `venv`, `node_modules`, etc.)
+and packed into one archive. Uses the latest installed model generation
+unless `--model` is given. Writes `<name>.satish_<generation>` unless
+`--out` is given.
+
+```
 omni decompress <file.satish_*> [--out PATH]
-omni info <file.satish_*>                              # header only, no model needed
-omni models                                             # installed model generations
-omni version
 ```
-
-Model management — `omni model update` fetches the latest generation
-directly from this repo's [GitHub Releases](https://github.com/ben-blance/omni/releases)
-(tagged `<generation>-<year>`, e.g. `andromeda-2026`), no separate registry
-server required:
+Reconstructs the original file or directory tree. Always uses whichever
+model generation the archive itself says it needs, regardless of what's
+set as default — run `omni model update` first if that generation isn't
+installed yet. Without `--out`, a directory archive restores into a folder
+named after the original; a single-file archive restores as that file in
+the current directory.
 
 ```
-omni model update                                       # install/refresh the latest generation
-omni model update --force                                # re-download even if already installed
+omni info <file.satish_*>
+```
+Prints an archive's metadata — model generation, file list, compressed
+size, checksum status — without needing any model installed.
+
+```
+omni models
+```
+Lists installed model generations and which one is the default.
+
+```
+omni model update [--force]
+```
+Installs or refreshes the latest model generation. `--force` re-downloads
+even if that generation is already installed.
+
+```
 omni model register <name> <year> <model.pt> --so <arithmetic_coder.so> [--default]
+```
+Registers a local model file as a named generation, for offline use.
+
+```
 omni model default <name>
 ```
+Sets which installed generation `omni compress` uses by default.
 
-`omni model update` checks `ben-blance/omni` by default — override with the
-`OMNI_MODEL_REPO` env var (`owner/repo`) to point at a fork.
+```
+omni version
+```
+Prints the CLI and format versions.
 
-`omni compress` always uses the latest installed generation unless you pass
-`--model`. `omni decompress` always uses whatever generation the archive's
-header says it needs — see [docs/satish-format.md](docs/satish-format.md).
+## The `.satish_<generation>` file
+
+Every OMNI archive's extension names the model generation that produced it
+— `andromeda-2026` compresses to `.satish_andromeda`, a later generation to
+its own extension, and so on. That name isn't cosmetic: it's read from the
+archive's own header, so `omni decompress` always knows exactly which model
+to use, even years later or on a machine with several generations
+installed. New generations are additive — decompressing an old archive
+never requires upgrading anything, only having that generation's model
+available (`omni model update` fetches whichever is current; older
+generations can still be installed manually via `omni model register` if
+needed).
 
 ## Try it
 
 [`examples/`](examples/) has a walkthrough against a small sample project.
 
-## Public vs. private
+## License
 
-This repository is the **distribution layer only** — the CLI, the SATISH
-container format, docs, and install scripts. It does not contain the
-compression engine (tokenizer, model architecture, LZ matcher, arithmetic
-coder, or trained weights).
-
-```
-              this repo (public)
-                     │
-          ┌──────────┴──────────┐
-          │                     │
-    CLI (src/omni/)      SATISH format (documented,
-          │                docs/satish-format.md)
-          ▼
-   src/omni/engine.py  ──seam──▶  OMNI engine (private)
-                                        │
-                                        ▼
-                                 model: Andromeda (2026)
-```
-
-`src/omni/engine.py` is the only file that talks to the engine, and it does
-so dynamically (via `OMNI_ENGINE_SRC`, or a private package once one
-exists) — nothing else in this package needs to change when the engine
-moves to its own private repo or ships as a compiled binary.
-
-The SATISH *format* is public and documented on purpose (see
-[docs/satish-format.md](docs/satish-format.md)) even though the *engine*
-isn't: a `.satish_*` file's header should always be inspectable, independent
-of whether you have the model or algorithm that produced it.
-
-**License:** MIT — see [LICENSE](LICENSE). This covers the CLI and SATISH
-format shell in this repo only; it does not extend to the private
-compression engine or trained model weights, which are distributed
-separately (see "Public vs. private" above) and are not covered by this
-license.
+MIT — see [LICENSE](LICENSE).

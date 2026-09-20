@@ -18,8 +18,11 @@ omni info sample_project.satish_andromeda
 # ...
 
 omni decompress sample_project.satish_andromeda --out restored
-diff -r examples/sample_project restored/sample_project   # identical
+diff -r examples/sample_project restored   # identical
 ```
+
+Without `--out`, it reconstructs into a directory named after the original
+(`sample_project/`) instead.
 
 A single loose file works the same way, without a wrapping directory:
 
