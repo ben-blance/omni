@@ -39,6 +39,12 @@ standard general-purpose baseline):
 Every result above is a full round-trip: decompressed output verified
 byte-identical to the original source across all files in every repo.
 
+These numbers are for the `.py` files specifically (both sides of the
+comparison see the same file set). `omni compress` on a real project also
+packs everything else — docs, configs, images — through generic codecs, so
+the overall saving % on a real `omni compress my_project/` run will differ
+from this table; it reflects the whole project, not just the Python source.
+
 ## Install
 
 ```
@@ -66,11 +72,13 @@ omni decompress my_project.satish_andromeda
 ```
 omni compress <path> [--model NAME] [--out FILE]
 ```
-Compress a single file or a whole directory. Directories are walked for
-`.py` files (skipping `.git`, `__pycache__`, `venv`, `node_modules`, etc.)
-and packed into one archive. Uses the latest installed model generation
-unless `--model` is given. Writes `<name>.satish_<generation>` unless
-`--out` is given.
+Compress a single file or a whole directory into one archive — every file
+is preserved, not just `.py` (skipping `.git`, `__pycache__`, `venv`,
+`node_modules`, etc.). Python source gets the trained neural engine;
+everything else goes through a generic codec (compressed or stored as-is,
+depending on the format) — `omni compress` never silently drops a file.
+Uses the latest installed model generation unless `--model` is given.
+Writes `<name>.satish_<generation>` unless `--out` is given.
 
 ```
 omni decompress <file.satish_*> [--out PATH]
@@ -85,8 +93,9 @@ the current directory.
 ```
 omni info <file.satish_*>
 ```
-Prints an archive's metadata — model generation, file list, compressed
-size, checksum status — without needing any model installed.
+Prints an archive's metadata — model generation, size, and a breakdown of
+which codec compressed each file — without needing any model installed
+(unless the archive actually contains Python files).
 
 ```
 omni models

@@ -19,9 +19,10 @@ import argparse
 import sys
 import threading
 import time
+from collections import Counter
 from pathlib import Path
 
-from . import __version__, engine, registry, remote, satish
+from . import __version__, codecs, engine, registry, remote, satish
 
 _IGNORE_DIRS = {".git", "__pycache__", "venv", ".venv", "node_modules",
                  ".mypy_cache", ".pytest_cache", "build", "dist", ".tox"}
@@ -56,9 +57,11 @@ def _with_progress(label: str, fn, *args, **kwargs):
         sys.stdout.flush()
 
 
-def _collect_py_files(root: Path) -> list[Path]:
+def _collect_all_files(root: Path) -> list[Path]:
     files = []
-    for p in sorted(root.rglob("*.py")):
+    for p in sorted(root.rglob("*")):
+        if not p.is_file():
+            continue
         if any(part in _IGNORE_DIRS for part in p.parts):
             continue
         files.append(p)
@@ -87,38 +90,80 @@ def cmd_compress(args: argparse.Namespace) -> None:
 
     if src_path.is_dir():
         root_name = src_path.name
-        found = _collect_py_files(src_path)
+        found = _collect_all_files(src_path)
         if not found:
-            print(f"error: no .py files found under {src_path}", file=sys.stderr)
+            print(f"error: no files found under {src_path}", file=sys.stderr)
             sys.exit(1)
-        rel_paths = [str(f.relative_to(src_path)) for f in found]
-        sources = [f.read_text(encoding="utf-8", errors="replace") for f in found]
+        file_paths = [(f, str(f.relative_to(src_path))) for f in found]
     else:
         root_name = src_path.stem
-        rel_paths = [src_path.name]
-        sources = [src_path.read_text(encoding="utf-8", errors="replace")]
+        file_paths = [(src_path, src_path.name)]
 
     entry = _resolve_model(args.model)
-    n_files = len(rel_paths)
-    print(f"[omni] compressing {n_files} file(s) with model "
+    print(f"[omni] compressing {len(file_paths)} file(s) with model "
           f"'{entry.name}' ({entry.year}) …")
 
-    model = engine.load_model(entry.model_path)
-    blob, stats = _with_progress(
-        "compressing", engine.compress_sources, sources, model,
-        entry.so_path, min_match=args.min_match,
-    )
+    # Classify every file up front: Python source shares one combined
+    # cross-file-context payload via the neural engine; everything else
+    # gets its own independent payload via a generic codec (codecs.py) —
+    # this is what guarantees `omni compress` never silently drops a file.
+    python_items: list[tuple[str, bytes]] = []
+    generic_items: list[tuple[str, str, str, bytes]] = []  # path, type, codec, raw
+    for f, rel in file_paths:
+        file_type, codec = codecs.classify(f)
+        raw = f.read_bytes()
+        if codec == codecs.CODEC_OMNI_PYTHON:
+            python_items.append((rel, raw))
+        else:
+            generic_items.append((rel, file_type, codec, raw))
+
+    omni_python_payload = b""
+    stats = {"n_copies": 0}
+    python_entries: list[satish.FileEntry] = []
+    if python_items:
+        model = engine.load_model(entry.model_path)
+        python_sources = [raw.decode("utf-8", errors="replace") for _, raw in python_items]
+        omni_python_payload, stats = _with_progress(
+            "compressing", engine.compress_sources, python_sources, model,
+            entry.so_path, min_match=args.min_match,
+        )
+        for (rel, raw), _ in zip(python_items, python_sources):
+            python_entries.append(satish.FileEntry(
+                path=rel, file_type="python", codec=codecs.CODEC_OMNI_PYTHON,
+                codec_version=engine.ENGINE_FORMAT_VERSION,
+                original_size=len(raw), checksum=satish.checksum_of(raw),
+            ))
+
+    generic_entries: list[satish.FileEntry] = []
+    other_payloads: list[bytes] = []
+    for rel, file_type, codec, raw in generic_items:
+        payload = codecs.encode(codec, raw)
+        other_payloads.append(payload)
+        generic_entries.append(satish.FileEntry(
+            path=rel, file_type=file_type, codec=codec,
+            codec_version=codecs.CODEC_VERSION,
+            original_size=len(raw), checksum=satish.checksum_of(raw),
+        ))
+
+    # Reassemble in the original walk order (not python-then-generic) so
+    # `omni info` lists files the way a user would expect to see them.
+    by_path = {e.path: e for e in python_entries + generic_entries}
+    entries = [by_path[rel] for _, rel in file_paths]
 
     out_path = (Path(args.out) if args.out
                 else Path(f"{root_name}{satish.extension_for(entry.name)}"))
     packed = satish.pack(entry.name, entry.year, engine.ENGINE_FORMAT_VERSION,
-                          root_name, rel_paths, blob)
+                          root_name, entries, omni_python_payload, other_payloads)
     out_path.write_bytes(packed)
 
-    orig_size = sum(len(s.encode("utf-8")) for s in sources)
+    orig_size = sum(e.original_size for e in entries)
     saving = (1 - len(packed) / orig_size) * 100 if orig_size else 0.0
-    print(f"[omni] {orig_size:,} B -> {len(packed):,} B  ({saving:.1f}% saved, "
-          f"{stats['n_copies']:,} copies)")
+    print(f"[omni] {orig_size:,} B -> {len(packed):,} B  ({saving:.1f}% saved)")
+    if python_entries:
+        print(f"[omni]   {len(python_entries)} Python file(s) via neural engine "
+              f"({stats['n_copies']:,} copies)")
+    if generic_entries:
+        print(f"[omni]   {len(generic_entries)} other file(s) via generic codecs")
     print(f"[omni] wrote {out_path}")
 
 
@@ -129,60 +174,92 @@ def cmd_decompress(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     parsed = satish.parse(in_path.read_bytes())
-    if not parsed.checksum_ok:
-        print("error: checksum mismatch — file may be corrupted or truncated",
-              file=sys.stderr)
-        sys.exit(1)
     if parsed.engine_format_version != engine.ENGINE_FORMAT_VERSION:
         print(f"error: this archive's engine format (v{parsed.engine_format_version}) "
               f"isn't supported by this omni build (v{engine.ENGINE_FORMAT_VERSION}) "
               f"— update omni", file=sys.stderr)
         sys.exit(1)
 
-    entry = registry.get(parsed.generation)
-    if entry is None:
-        print(f"error: model generation '{parsed.generation}' is not installed.\n"
-              f"       Run `omni model update`, or register it manually with "
-              f"`omni model register`.", file=sys.stderr)
+    python_sources: list[str] = []
+    if any(e.codec == codecs.CODEC_OMNI_PYTHON for e in parsed.entries):
+        entry = registry.get(parsed.generation)
+        if entry is None:
+            print(f"error: model generation '{parsed.generation}' is not installed.\n"
+                  f"       Run `omni model update`, or register it manually with "
+                  f"`omni model register`.", file=sys.stderr)
+            sys.exit(1)
+        print(f"[omni] decompressing with model '{entry.name}' ({entry.year}) …")
+        model = engine.load_model(entry.model_path)
+        python_sources = _with_progress(
+            "decompressing", engine.decompress_sources,
+            parsed.omni_python_payload, model, entry.so_path,
+        )
+
+    single_flat_file = len(parsed.entries) == 1 and "/" not in parsed.entries[0].path
+    out_dir = None if single_flat_file else (Path(args.out) if args.out else Path(parsed.root))
+    resolved_out = out_dir.resolve() if out_dir else None
+
+    py_i = other_i = 0
+    mismatches = []
+    for e in parsed.entries:
+        if e.codec == codecs.CODEC_OMNI_PYTHON:
+            content = python_sources[py_i].encode("utf-8")
+            py_i += 1
+        else:
+            content = codecs.decode(e.codec, parsed.other_payloads[other_i])
+            other_i += 1
+
+        if satish.checksum_of(content) != e.checksum:
+            mismatches.append(e.path)
+
+        if single_flat_file:
+            dest = Path(args.out) if args.out else Path(e.path)
+        else:
+            dest = (out_dir / e.path).resolve()
+            if resolved_out not in dest.parents:
+                print(f"error: archive entry '{e.path}' escapes the output "
+                      f"directory — refusing to write it", file=sys.stderr)
+                sys.exit(1)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(content)
+
+    if mismatches:
+        shown = ", ".join(mismatches[:5]) + ("…" if len(mismatches) > 5 else "")
+        print(f"error: checksum mismatch on {len(mismatches)} file(s): {shown}",
+              file=sys.stderr)
         sys.exit(1)
 
-    print(f"[omni] decompressing with model '{entry.name}' ({entry.year}) …")
-    model = engine.load_model(entry.model_path)
-    sources = _with_progress(
-        "decompressing", engine.decompress_sources, parsed.payload, model, entry.so_path,
-    )
-
-    single_flat_file = len(parsed.files) == 1 and "/" not in parsed.files[0]
     if single_flat_file:
-        dest = Path(args.out) if args.out else Path(parsed.files[0])
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(sources[0], encoding="utf-8")
-        print(f"[omni] wrote {dest}")
-        return
-
-    out_dir = Path(args.out) if args.out else Path(parsed.root)
-    for rel, content in zip(parsed.files, sources):
-        dest = out_dir / rel
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(content, encoding="utf-8")
-    print(f"[omni] reconstructed {len(parsed.files)} file(s) into {out_dir}/")
+        print(f"[omni] wrote {Path(args.out) if args.out else Path(parsed.entries[0].path)}")
+    else:
+        print(f"[omni] reconstructed {len(parsed.entries)} file(s) into {out_dir}/")
 
 
 def cmd_info(args: argparse.Namespace) -> None:
     in_path = Path(args.file)
     parsed = satish.parse(in_path.read_bytes())
+    orig_total = sum(e.original_size for e in parsed.entries)
+
     print(f"SATISH format version : {satish.FORMAT_VERSION}")
     print(f"Model generation      : {parsed.generation} ({parsed.generation_year})")
     print(f"Engine format version : {parsed.engine_format_version}")
     print(f"Root                  : {parsed.root}")
-    print(f"Files                 : {len(parsed.files)}")
-    for f in parsed.files:
-        print(f"  - {f}")
-    print(f"Compressed payload    : {len(parsed.payload):,} B")
-    print(f"Checksum              : {'OK' if parsed.checksum_ok else 'MISMATCH'}")
+    print(f"Files                 : {len(parsed.entries)}")
+    print(f"Original size         : {orig_total:,} B")
+    print(f"Archive size          : {in_path.stat().st_size:,} B")
 
-    entry = registry.get(parsed.generation)
-    print(f"Model installed       : {'yes' if entry else 'no'}")
+    print("\nCodecs:")
+    for codec, count in Counter(e.codec for e in parsed.entries).most_common():
+        print(f"  {codec:<15} {count:>5} file(s)")
+
+    print("\nBy type:")
+    for t, count in Counter(e.file_type for e in parsed.entries).most_common():
+        print(f"  {t:<15} {count:>5}")
+
+    needs_model = any(e.codec == codecs.CODEC_OMNI_PYTHON for e in parsed.entries)
+    entry = registry.get(parsed.generation) if needs_model else None
+    print(f"\nModel installed       : "
+          f"{'not needed' if not needs_model else ('yes' if entry else 'no')}")
 
 
 def cmd_version(_args: argparse.Namespace) -> None:
