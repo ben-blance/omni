@@ -1,5 +1,10 @@
+<div align="center">
+
 # OMNI
 
+<img width="500" height="500" alt="1shot__6_-removebg-preview" src="https://github.com/user-attachments/assets/7e11c236-aa11-4371-9e34-e327a8c39b71" />
+
+</div>
 OMNI is a neural compressor for Python source code. It combines a trained
 sequence model with explicit long-range copy matching and entropy coding to
 beat general-purpose compressors on ratio.
