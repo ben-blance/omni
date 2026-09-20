@@ -123,6 +123,14 @@ def _engine_importable() -> bool:
         return False
 
 
+def _torch_importable() -> bool:
+    try:
+        importlib.import_module("torch")
+        return True
+    except ImportError:
+        return False
+
+
 def install_engine(force: bool = False) -> str:
     """Install the compiled omni-engine wheel from the latest GitHub Release
     into whatever Python environment `omni` itself is running under. Returns
@@ -144,12 +152,39 @@ def install_engine(force: bool = False) -> str:
               f"({wheel_asset['size'] / 1e6:.1f} MB) …")
         _download(wheel_asset["browser_download_url"], wheel_path)
 
+        # torch's default PyPI build pulls the full CUDA/GPU toolkit (NVIDIA
+        # cuDNN/NCCL/triton/etc, several GB) even on a machine with no GPU.
+        # This project only ever runs CPU inference, so pin torch to
+        # PyPI's dedicated CPU-only index FIRST -- once it's satisfied
+        # there, installing the engine wheel afterward won't touch it
+        # again (pip doesn't reinstall an already-satisfied dependency).
+        if force or not _torch_importable():
+            print("[omni] installing torch (CPU build, ~200 MB) — pip's own "
+                  "progress shows below …")
+            torch_cmd = [
+                sys.executable, "-m", "pip", "install",
+                "--index-url", "https://download.pytorch.org/whl/cpu",
+                "torch>=2.0",
+            ]
+            if force:
+                torch_cmd.append("--force-reinstall")
+            result = subprocess.run(torch_cmd)
+            if result.returncode != 0:
+                raise UpdateError(
+                    "torch install failed — see pip's output above for the reason"
+                )
+
         print(f"[omni] installing {wheel_asset['name']} …")
         cmd = [sys.executable, "-m", "pip", "install", str(wheel_path)]
         if force:
             cmd.append("--force-reinstall")
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        # Deliberately NOT capturing output — pip's own download/install
+        # progress streams straight to the terminal so this doesn't look
+        # stuck during the (often slow) numpy download, if needed.
+        result = subprocess.run(cmd)
         if result.returncode != 0:
-            raise UpdateError(f"pip install failed:\n{result.stderr}")
+            raise UpdateError(
+                "pip install failed — see pip's output above for the reason"
+            )
 
     return wheel_asset["name"]
