@@ -5,14 +5,22 @@ This module is the reference implementation of the spec in
 docs/satish-format.md. Keep the two in sync: if you change the byte layout
 here, update the doc in the same change.
 
-Format v2 is a multi-codec container: every file gets its own manifest
-entry recording which codec compressed it. Python files all share ONE
-combined "omni_python" payload (the trained engine's cross-file-context
-blob — SATISH never looks inside it, that's engine.py's job). Every other
-file gets its own independent payload, compressed with a generic codec
-(codecs.py) or stored raw. This is what makes `omni compress` able to
-losslessly pack a whole project instead of silently dropping non-Python
-files.
+Format v3 is a three-lane multi-codec container. Every file gets its own
+manifest entry recording which codec compressed it, and lands in one of
+three payload lanes:
+  - omni_python payload  — ONE combined payload for all Python files,
+    encoded by the trained engine with full cross-file context. SATISH
+    never looks inside it, that's engine.py's job.
+  - generic stream payload — ONE combined zstd payload for all other
+    compressible files (docs, configs, structured text, ...), so the
+    generic codec can also see redundancy *across* files instead of
+    compressing each one in isolation (see codecs.py's module docstring
+    for why this matters).
+  - store payloads — one independent, uncompressed payload per file for
+    formats that are already compressed (images, archives, media).
+
+A checksum per file catches corruption before it's silently mis-decoded,
+independent of which lane produced that file.
 """
 
 from __future__ import annotations
@@ -23,7 +31,7 @@ import zlib
 from dataclasses import dataclass
 
 MAGIC = b"SATI"
-FORMAT_VERSION = 2
+FORMAT_VERSION = 3
 
 
 @dataclass
@@ -34,6 +42,8 @@ class FileEntry:
     codec_version: int
     original_size: int
     checksum: str  # hex CRC32 of the original (decompressed) file bytes
+    offset: int | None = None  # zstd_stream entries only: start within the
+                                # decompressed generic stream
 
 
 @dataclass
@@ -44,7 +54,8 @@ class ParsedSatish:
     root: str
     entries: list[FileEntry]
     omni_python_payload: bytes
-    other_payloads: list[bytes]  # aligned, in order, with non-omni_python entries
+    generic_stream_payload: bytes
+    store_payloads: list[bytes]  # aligned, in order, with codec=="store" entries
 
 
 def extension_for(generation: str) -> str:
@@ -57,7 +68,7 @@ def checksum_of(data: bytes) -> str:
 
 def pack(generation: str, generation_year: int, engine_format_version: int,
          root: str, entries: list[FileEntry], omni_python_payload: bytes,
-         other_payloads: list[bytes]) -> bytes:
+         generic_stream_payload: bytes, store_payloads: list[bytes]) -> bytes:
     manifest = zlib.compress(
         json.dumps({
             "root": root,
@@ -66,6 +77,7 @@ def pack(generation: str, generation_year: int, engine_format_version: int,
                     "path": e.path, "type": e.file_type, "codec": e.codec,
                     "codec_version": e.codec_version,
                     "original_size": e.original_size, "checksum": e.checksum,
+                    **({"offset": e.offset} if e.offset is not None else {}),
                 }
                 for e in entries
             ],
@@ -81,8 +93,9 @@ def pack(generation: str, generation_year: int, engine_format_version: int,
     out += struct.pack(">B", engine_format_version)
     out += struct.pack(">I", len(manifest)) + manifest
     out += struct.pack(">I", len(omni_python_payload)) + omni_python_payload
-    out += struct.pack(">I", len(other_payloads))
-    for payload in other_payloads:
+    out += struct.pack(">I", len(generic_stream_payload)) + generic_stream_payload
+    out += struct.pack(">I", len(store_payloads))
+    for payload in store_payloads:
         out += struct.pack(">I", len(payload)) + payload
     return bytes(out)
 
@@ -115,7 +128,7 @@ def parse(data: bytes) -> ParsedSatish:
         FileEntry(
             path=f["path"], file_type=f["type"], codec=f["codec"],
             codec_version=f["codec_version"], original_size=f["original_size"],
-            checksum=f["checksum"],
+            checksum=f["checksum"], offset=f.get("offset"),
         )
         for f in manifest["files"]
     ]
@@ -124,11 +137,15 @@ def parse(data: bytes) -> ParsedSatish:
     omni_python_payload = data[pos:pos + omni_len]
     pos += omni_len
 
-    (n_other,) = struct.unpack_from(">I", data, pos); pos += 4
-    other_payloads = []
-    for _ in range(n_other):
+    (stream_len,) = struct.unpack_from(">I", data, pos); pos += 4
+    generic_stream_payload = data[pos:pos + stream_len]
+    pos += stream_len
+
+    (n_store,) = struct.unpack_from(">I", data, pos); pos += 4
+    store_payloads = []
+    for _ in range(n_store):
         (plen,) = struct.unpack_from(">I", data, pos); pos += 4
-        other_payloads.append(data[pos:pos + plen])
+        store_payloads.append(data[pos:pos + plen])
         pos += plen
 
     return ParsedSatish(
@@ -138,5 +155,6 @@ def parse(data: bytes) -> ParsedSatish:
         root=manifest["root"],
         entries=entries,
         omni_python_payload=omni_python_payload,
-        other_payloads=other_payloads,
+        generic_stream_payload=generic_stream_payload,
+        store_payloads=store_payloads,
     )

@@ -103,19 +103,30 @@ def cmd_compress(args: argparse.Namespace) -> None:
     print(f"[omni] compressing {len(file_paths)} file(s) with model "
           f"'{entry.name}' ({entry.year}) …")
 
-    # Classify every file up front: Python source shares one combined
-    # cross-file-context payload via the neural engine; everything else
-    # gets its own independent payload via a generic codec (codecs.py) —
-    # this is what guarantees `omni compress` never silently drops a file.
+    # Classify every file up front into three lanes: Python source shares
+    # one combined cross-file-context payload via the neural engine;
+    # compressible non-Python files share ONE combined xz stream (so
+    # redundancy ACROSS files is still visible, not just within one file);
+    # already-compressed formats are stored independently, uncompressed.
+    # This split is what guarantees `omni compress` never silently drops
+    # a file while still competing with whole-archive tools like tar+xz.
+    #
+    # STORE is only a tentative, extension-based guess — every candidate
+    # gets an empirical check (codecs.prefer_compression) before being
+    # committed to STORE, since not every "already compressed" format
+    # actually is (e.g. unoptimized PNG screenshots still have real headroom).
     python_items: list[tuple[str, bytes]] = []
-    generic_items: list[tuple[str, str, str, bytes]] = []  # path, type, codec, raw
+    stream_items: list[tuple[str, str, bytes]] = []   # path, type, raw
+    store_items: list[tuple[str, str, bytes]] = []    # path, type, raw
     for f, rel in file_paths:
         file_type, codec = codecs.classify(f)
         raw = f.read_bytes()
         if codec == codecs.CODEC_OMNI_PYTHON:
             python_items.append((rel, raw))
+        elif codec == codecs.CODEC_STORE and not codecs.prefer_compression(raw):
+            store_items.append((rel, file_type, raw))
         else:
-            generic_items.append((rel, file_type, codec, raw))
+            stream_items.append((rel, file_type, raw))
 
     omni_python_payload = b""
     stats = {"n_copies": 0}
@@ -134,26 +145,41 @@ def cmd_compress(args: argparse.Namespace) -> None:
                 original_size=len(raw), checksum=satish.checksum_of(raw),
             ))
 
-    generic_entries: list[satish.FileEntry] = []
-    other_payloads: list[bytes] = []
-    for rel, file_type, codec, raw in generic_items:
-        payload = codecs.encode(codec, raw)
-        other_payloads.append(payload)
-        generic_entries.append(satish.FileEntry(
-            path=rel, file_type=file_type, codec=codec,
+    stream_entries: list[satish.FileEntry] = []
+    generic_stream_payload = b""
+    if stream_items:
+        offset = 0
+        chunks = []
+        for rel, file_type, raw in stream_items:
+            stream_entries.append(satish.FileEntry(
+                path=rel, file_type=file_type, codec=codecs.CODEC_GENERIC_STREAM,
+                codec_version=codecs.CODEC_VERSION,
+                original_size=len(raw), checksum=satish.checksum_of(raw), offset=offset,
+            ))
+            chunks.append(raw)
+            offset += len(raw)
+        generic_stream_payload = codecs.compress_stream(chunks)
+
+    store_entries: list[satish.FileEntry] = []
+    store_payloads: list[bytes] = []
+    for rel, file_type, raw in store_items:
+        store_payloads.append(raw)
+        store_entries.append(satish.FileEntry(
+            path=rel, file_type=file_type, codec=codecs.CODEC_STORE,
             codec_version=codecs.CODEC_VERSION,
             original_size=len(raw), checksum=satish.checksum_of(raw),
         ))
 
-    # Reassemble in the original walk order (not python-then-generic) so
-    # `omni info` lists files the way a user would expect to see them.
-    by_path = {e.path: e for e in python_entries + generic_entries}
+    # Reassemble in the original walk order so `omni info` lists files the
+    # way a user would expect to see them, not grouped by lane.
+    by_path = {e.path: e for e in python_entries + stream_entries + store_entries}
     entries = [by_path[rel] for _, rel in file_paths]
 
     out_path = (Path(args.out) if args.out
                 else Path(f"{root_name}{satish.extension_for(entry.name)}"))
     packed = satish.pack(entry.name, entry.year, engine.ENGINE_FORMAT_VERSION,
-                          root_name, entries, omni_python_payload, other_payloads)
+                          root_name, entries, omni_python_payload,
+                          generic_stream_payload, store_payloads)
     out_path.write_bytes(packed)
 
     orig_size = sum(e.original_size for e in entries)
@@ -162,8 +188,10 @@ def cmd_compress(args: argparse.Namespace) -> None:
     if python_entries:
         print(f"[omni]   {len(python_entries)} Python file(s) via neural engine "
               f"({stats['n_copies']:,} copies)")
-    if generic_entries:
-        print(f"[omni]   {len(generic_entries)} other file(s) via generic codecs")
+    if stream_entries:
+        print(f"[omni]   {len(stream_entries)} file(s) via shared xz stream")
+    if store_entries:
+        print(f"[omni]   {len(store_entries)} file(s) stored as-is (already compressed)")
     print(f"[omni] wrote {out_path}")
 
 
@@ -195,19 +223,23 @@ def cmd_decompress(args: argparse.Namespace) -> None:
             parsed.omni_python_payload, model, entry.so_path,
         )
 
+    generic_stream = codecs.decompress_stream(parsed.generic_stream_payload)
+
     single_flat_file = len(parsed.entries) == 1 and "/" not in parsed.entries[0].path
     out_dir = None if single_flat_file else (Path(args.out) if args.out else Path(parsed.root))
     resolved_out = out_dir.resolve() if out_dir else None
 
-    py_i = other_i = 0
+    py_i = store_i = 0
     mismatches = []
     for e in parsed.entries:
         if e.codec == codecs.CODEC_OMNI_PYTHON:
             content = python_sources[py_i].encode("utf-8")
             py_i += 1
+        elif e.codec == codecs.CODEC_GENERIC_STREAM:
+            content = generic_stream[e.offset:e.offset + e.original_size]
         else:
-            content = codecs.decode(e.codec, parsed.other_payloads[other_i])
-            other_i += 1
+            content = parsed.store_payloads[store_i]
+            store_i += 1
 
         if satish.checksum_of(content) != e.checksum:
             mismatches.append(e.path)

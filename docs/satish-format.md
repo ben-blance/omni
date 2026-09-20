@@ -18,17 +18,25 @@ compress` pack a whole project — source code, docs, configs, images,
 whatever — into one archive without silently discarding anything, even
 though only Python source has a trained neural codec today.
 
-- **Python files** (`.py`, `.pyi`) all share ONE combined payload, encoded
-  by the trained engine with full cross-file context — this is the
-  proprietary part, and the only thing that actually needs a model
-  installed.
-- **Everything else** gets its own independent payload, compressed with a
-  small set of built-in generic codecs (`zlib` for compressible text/data,
-  `store` for formats that are already compressed, like images or
-  archives) — no model required.
+Files land in one of three payload **lanes**:
+
+- **Python** (`.py`, `.pyi`) — all such files share ONE combined payload,
+  encoded by the trained engine with full cross-file context. This is the
+  proprietary part, and the only lane that needs a model installed.
+- **Generic / compressible** (docs, configs, structured text, source in
+  languages without a dedicated codec yet, ...) — ALL such files are
+  concatenated and compressed together as ONE xz stream, not compressed
+  file-by-file. Independent per-file compression can't see redundancy
+  *across* files (repeated license headers, near-identical CI configs,
+  shared doc boilerplate) — exactly what a whole-archive tool like
+  `tar+xz` exploits, and now SATISH does too.
+- **Store** (images, archives, media — already compressed) — each such
+  file gets its own independent, uncompressed payload. Deliberately kept
+  OUT of the shared stream too: there's no redundancy for it to find in
+  already-compressed bytes, only wasted CPU.
 
 A checksum per file catches corruption before it's silently mis-decoded,
-independent of which codec produced that file.
+independent of which lane produced that file.
 
 ## Byte layout
 
@@ -38,22 +46,23 @@ the start of the file.
 | field | type | size | notes |
 |---|---|---|---|
 | magic | bytes | 4 | always `b"SATI"` |
-| format_version | uint8 | 1 | this document describes version `2` |
+| format_version | uint8 | 1 | this document describes version `3` |
 | generation_len | uint8 | 1 | length of the generation name in bytes |
 | generation | utf-8 bytes | `generation_len` | lowercased model generation name, e.g. `"andromeda"` |
 | generation_year | uint16 | 2 | e.g. `2026` |
-| engine_format_version | uint8 | 1 | versions the omni_python payload's internal shape, independent of `generation` |
+| engine_format_version | uint8 | 1 | versions the Python payload's internal shape, independent of `generation` |
 | manifest_len | uint32 | 4 | length of the compressed manifest that follows |
-| manifest | zlib bytes | `manifest_len` | zlib-compressed JSON, see below |
+| manifest | zlib bytes | `manifest_len` | zlib-compressed JSON, see below (the manifest itself is always zlib — this is unrelated to which codec compressed each file) |
 | omni_python_payload_len | uint32 | 4 | length of the combined Python payload (0 if no Python files) |
 | omni_python_payload | bytes | `omni_python_payload_len` | opaque — produced and consumed only by the engine |
-| n_other | uint32 | 4 | number of non-Python file payloads that follow |
-| (repeated `n_other` times) payload_len | uint32 | 4 | length of this payload |
-| (repeated `n_other` times) payload | bytes | `payload_len` | this file's own compressed (or stored) bytes |
+| generic_stream_payload_len | uint32 | 4 | length of the combined xz payload (0 if no generic files) |
+| generic_stream_payload | bytes | `generic_stream_payload_len` | one xz frame covering every `xz_stream` file's bytes, concatenated |
+| n_store | uint32 | 4 | number of stored (uncompressed) file payloads that follow |
+| (repeated `n_store` times) payload_len | uint32 | 4 | length of this payload |
+| (repeated `n_store` times) payload | bytes | `payload_len` | this file's own raw bytes |
 
-The per-file payloads after `omni_python_payload` appear in the **same
-order** their manifest entries do, skipping any entry whose codec is
-`omni_python` (those are all inside the one combined payload instead).
+The `n_store` payloads appear in the **same order** their manifest entries
+do, skipping any entry whose codec isn't `store`.
 
 ### Manifest JSON shape
 
@@ -72,10 +81,11 @@ order** their manifest entries do, skipping any entry whose codec is
     {
       "path": "README.md",
       "type": "markdown",
-      "codec": "zlib",
+      "codec": "xz_stream",
       "codec_version": 1,
       "original_size": 512,
-      "checksum": "9f8e7d6c"
+      "checksum": "9f8e7d6c",
+      "offset": 0
     },
     {
       "path": "logo.png",
@@ -91,29 +101,32 @@ order** their manifest entries do, skipping any entry whose codec is
 
 `checksum` is the lowercase-hex CRC32 of the file's **original**
 (decompressed) bytes — checked after decoding, regardless of codec.
+`offset` only appears on `xz_stream` entries: it's this file's start
+position within the *decompressed* generic stream (read `original_size`
+bytes from there to recover it).
 
 ## Codecs
 
 | codec | meaning | needs a model? |
 |---|---|---|
 | `omni_python` | trained neural engine, cross-file context | yes |
-| `zlib` | generic lossless compression | no |
+| `xz_stream` | shared xz/LZMA compression across all such files in the archive | no |
 | `store` | no compression — already-compressed formats (images, archives, media) | no |
 
 `codec` + `type` together say why a codec was chosen: `yaml` + `store`
 would mean YAML is being treated as an already-compressed format (it
 isn't, today), whereas `png` + `store` means PNG is *correctly* being left
-alone. Today only Python maps to `omni_python`; `type` classification for
-everything else maps to `zlib` unless it's a known already-compressed
-format. This mapping is expected to grow — a future generation could add
-a dedicated codec for YAML, JSON, Markdown, other languages, etc., without
-changing this container format at all.
+alone. Today only Python maps to `omni_python`; everything else maps to
+`xz_stream` unless it's a known already-compressed format. This mapping
+is expected to grow — a future generation could add a dedicated codec for
+YAML, JSON, Markdown, other languages, etc., without changing this
+container format at all.
 
 **Old archives never get silently reinterpreted.** An archive written
-today with `config.yaml` stored via `zlib` stays exactly that archive.
-There is no plan for a newer OMNI generation to change what an existing
-archive means — recompressing with a newer generation (once that exists)
-would produce a new archive, not mutate the old one.
+today with `config.yaml` compressed via `xz_stream` stays exactly that
+archive. There is no plan for a newer OMNI generation to change what an
+existing archive means — recompressing with a newer generation (once that
+exists) would produce a new archive, not mutate the old one.
 
 ## Versioning and forward compatibility
 
