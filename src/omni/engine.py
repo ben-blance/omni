@@ -71,9 +71,9 @@ def _ensure_loaded() -> None:
     src = _locate_engine_src()
     if src is None:
         raise EngineUnavailable(
-            "OMNI engine not found. Install the omni-engine package, or "
-            "set OMNI_ENGINE_SRC to the engine's source location for "
-            "local development."
+            "OMNI engine not found. Run `omni engine install`, or set "
+            "OMNI_ENGINE_SRC to the engine's source location for local "
+            "development."
         )
     if str(src) not in sys.path:
         sys.path.insert(0, str(src))

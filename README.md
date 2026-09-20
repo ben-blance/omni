@@ -38,16 +38,19 @@ byte-identical to the original source across all files in every repo.
 
 ```
 pipx install omni-compress
+omni engine install
 omni model update
 ```
 
-(`pip install omni-compress` works too if you don't use `pipx`.) `omni model
-update` downloads the current model generation — needed before `compress`/
+(`pip install omni-compress` works too if you don't use `pipx`.) `engine
+install` and `model update` are one-time setup — the engine and the
+current model generation both need to be present before `compress`/
 `decompress` will do anything.
 
 ## Quickstart
 
 ```
+omni engine install                  # one-time: install the compression engine
 omni model update                    # one-time: install the latest model
 omni compress my_project/            # -> my_project.satish_andromeda
 omni decompress my_project.satish_andromeda
@@ -100,6 +103,12 @@ Registers a local model file as a named generation, for offline use.
 omni model default <name>
 ```
 Sets which installed generation `omni compress` uses by default.
+
+```
+omni engine install [--force]
+```
+Installs the compiled compression engine (one-time setup, before `compress`/
+`decompress` can run). `--force` reinstalls even if already present.
 
 ```
 omni version

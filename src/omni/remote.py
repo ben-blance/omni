@@ -5,8 +5,9 @@ weights (via release assets), so there's no separate registry server to
 stand up.
 
 Release convention: tag name is "<generation>-<year>", e.g. "andromeda-2026".
-Each release is expected to have one *.pt asset (the model weights) and one
-*.so asset (the matching arithmetic coder shared library).
+Each release is expected to have one *.pt asset (the model weights), one
+*.so asset (the matching arithmetic coder shared library), and optionally
+one *.whl asset (the compiled omni-engine package for this platform).
 
 Uses only the standard library (urllib) so the CLI itself stays
 dependency-free — this is the one place it talks to the network.
@@ -14,10 +15,13 @@ dependency-free — this is the one place it talks to the network.
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import re
 import shutil
+import subprocess
+import sys
 import tempfile
 import urllib.error
 import urllib.request
@@ -108,3 +112,44 @@ def update(force: bool = False) -> registry.ModelEntry:
             str(so_path) if so_path else None,
             set_default=True,
         )
+
+
+def _engine_importable() -> bool:
+    try:
+        importlib.import_module("model")
+        importlib.import_module("compress")
+        return True
+    except ImportError:
+        return False
+
+
+def install_engine(force: bool = False) -> str:
+    """Install the compiled omni-engine wheel from the latest GitHub Release
+    into whatever Python environment `omni` itself is running under. Returns
+    the wheel filename installed, or 'already installed' if skipped."""
+    if not force and _engine_importable():
+        return "already installed"
+
+    release = latest_release()
+    assets = release.get("assets", [])
+    wheel_asset = next((a for a in assets if a["name"].endswith(".whl")), None)
+    if wheel_asset is None:
+        raise UpdateError(
+            f"release '{release.get('tag_name', '?')}' has no .whl engine asset"
+        )
+
+    with tempfile.TemporaryDirectory(prefix="omni-engine-") as tmp:
+        wheel_path = Path(tmp) / wheel_asset["name"]
+        print(f"[omni] downloading {wheel_asset['name']} "
+              f"({wheel_asset['size'] / 1e6:.1f} MB) …")
+        _download(wheel_asset["browser_download_url"], wheel_path)
+
+        print(f"[omni] installing {wheel_asset['name']} …")
+        cmd = [sys.executable, "-m", "pip", "install", str(wheel_path)]
+        if force:
+            cmd.append("--force-reinstall")
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise UpdateError(f"pip install failed:\n{result.stderr}")
+
+    return wheel_asset["name"]

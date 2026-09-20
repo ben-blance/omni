@@ -199,6 +199,18 @@ def cmd_model_update(args: argparse.Namespace) -> None:
     print(f"[omni] '{entry.name}' ({entry.year}) is installed and set as default")
 
 
+def cmd_engine_install(args: argparse.Namespace) -> None:
+    try:
+        result = remote.install_engine(force=args.force)
+    except remote.UpdateError as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(1)
+    if result == "already installed":
+        print("[omni] engine already installed (use --force to reinstall)")
+    else:
+        print(f"[omni] engine installed from {result}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="omni", description="OMNI — neural source-code compression")
     sub = p.add_subparsers(dest="command", required=True)
@@ -243,6 +255,13 @@ def build_parser() -> argparse.ArgumentParser:
     mu = msub.add_parser("update", help="Fetch the latest model generation")
     mu.add_argument("--force", action="store_true", help="Re-download even if already installed")
     mu.set_defaults(func=cmd_model_update)
+
+    eg = sub.add_parser("engine", help="Manage the compression engine")
+    esub = eg.add_subparsers(dest="engine_command", required=True)
+
+    ei = esub.add_parser("install", help="Install the compiled engine from the latest GitHub Release")
+    ei.add_argument("--force", action="store_true", help="Reinstall even if already installed")
+    ei.set_defaults(func=cmd_engine_install)
 
     return p
 
